@@ -8,14 +8,18 @@
 #define I2S_WS   GPIO_NUM_7
 #define I2S_DIN  GPIO_NUM_5
 
-#define ENDPOINT_ID 1
-ZigbeeDimmableLight zbBell(ENDPOINT_ID); 
+/* --- ZIGBEE CONFIGURATIE --- */
+ZigbeeDimmableLight zbBell(1);   // Endpoint 1: Volume & Aan/Uit
+ZigbeeDimmableLight zbPause(2);  // Endpoint 2: Pauze instelling
 
 i2s_chan_handle_t tx_handle = NULL;
 Preferences preferences;
 
-float current_volume = 0.15; 
-uint8_t last_zigbee_level = 77; 
+// Variabelen met standaardwaarden
+float current_volume = 0.15;
+uint8_t last_vol_level = 77;
+int pause_ms = 800;
+uint8_t last_pause_level = 80; // 80 * 10 = 800ms
 
 void setup_i2s() {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -33,76 +37,87 @@ void setup_i2s() {
 
 void play_bell() {
     if (tx_handle == NULL) return;
-
     size_t bytes_written;
     int num_samples = bell_sound_len / sizeof(int16_t);
     int herhalingen = 3; 
 
     for (int h = 0; h < herhalingen; h++) {
-        Serial.printf("Ronde %d met volume %.2f\n", h + 1, current_volume);
-        
-        i2s_channel_enable(tx_handle); // Hardware AAN
-
+        i2s_channel_enable(tx_handle);
         for (int i = 0; i < num_samples; i++) {
             int16_t sample = bell_sound[i]; 
             int16_t adjusted = (int16_t)(sample * current_volume);
             i2s_channel_write(tx_handle, &adjusted, sizeof(adjusted), &bytes_written, portMAX_DELAY);
         }
         
-        // 1. Schrijf een kort blokje stilte om de 'hik' weg te drukken
         int16_t silence = 0;
         for (int s = 0; s < 400; s++) {
             i2s_channel_write(tx_handle, &silence, sizeof(silence), &bytes_written, portMAX_DELAY);
         }
 
-        // 2. Hardware UIT zetten vóór de pauze (dit voorkomt overlap)
         i2s_channel_disable(tx_handle); 
 
-        // 3. De pauze tussen de belsignalen
         if (h < herhalingen - 1) {
-            delay(800); // 0,8 seconde echte stilte
+            Serial.printf("Pauze: %d ms\n", pause_ms);
+            delay(pause_ms); 
         }
     }
-    
-    zbBell.setLight(false, last_zigbee_level);
+    zbBell.setLight(false, last_vol_level);
 }
 
-void on_light_change(bool state, uint8_t level) {
-    // Volume bijwerken
+// Callback voor Volume (Endpoint 1)
+void on_vol_change(bool state, uint8_t level) {
     if (level > 0) {
-        last_zigbee_level = level;
-        // Schaal terug naar 0.0 - 0.5 (max 50%) voor veilig volume
-        current_volume = (float)level / 510.0; 
-        
+        last_vol_level = level;
+        current_volume = (float)level / 510.0;
         preferences.begin("bell", false);
         preferences.putFloat("volume", current_volume);
-        preferences.putUChar("level", last_zigbee_level);
+        preferences.putUChar("vol_lev", last_vol_level);
         preferences.end();
     }
+    if (state) play_bell();
+}
 
-    if (state) {
-        play_bell();
-    }
+// Callback voor Pauze (Endpoint 2)
+void on_pause_change(bool state, uint8_t level) {
+    // We gebruiken level 0-255 als 0-2550ms (stapjes van 10ms)
+    last_pause_level = level;
+    pause_ms = level * 10;
+    
+    preferences.begin("bell", false);
+    preferences.putInt("pause", pause_ms);
+    preferences.putUChar("pau_lev", last_pause_level);
+    preferences.end();
+    
+    Serial.printf("Nieuwe pauze ingesteld: %d ms\n", pause_ms);
 }
 
 void setup() {
     Serial.begin(115200);
     setup_i2s();
 
+    // Laad alle waarden uit het geheugen
     preferences.begin("bell", true);
     current_volume = preferences.getFloat("volume", 0.15);
-    last_zigbee_level = preferences.getUChar("level", 77);
+    last_vol_level = preferences.getUChar("vol_lev", 77);
+    pause_ms = preferences.getInt("pause", 800);
+    last_pause_level = preferences.getUChar("pau_lev", 80);
     preferences.end();
 
-    zbBell.onLightChange(on_light_change);
+    // Koppel callbacks
+    zbBell.onLightChange(on_vol_change);
+    zbPause.onLightChange(on_pause_change);
+    
+    // Voeg beide endpoints toe
     Zigbee.addEndpoint(&zbBell);
+    Zigbee.addEndpoint(&zbPause);
 
     if (!Zigbee.begin()) {
         while (1) delay(10);
     }
     
-    zbBell.setLight(false, last_zigbee_level);
-    Serial.println("Systeem klaar.");
+    zbBell.setLight(false, last_vol_level);
+    zbPause.setLight(false, last_pause_level);
+    Serial.println("Systeem klaar. Twee schuifbalken beschikbaar.");
 }
 
 void loop() {
